@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Bangladesh Admin Boundary Map</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+    <link href="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.js"></script>
+
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+        .map-overlay {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 3px;
+            padding: 10px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+            z-index: 10;
+        }
+        #controls {
+            top: 10px;
+            left: 10px;
+            max-width: 300px; /* Adjust as needed */
+        }
+        #controls label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        #controls select {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box; /* Include padding in width */
+        }
+        .maplibregl-popup {
+            max-width: 400px;
+            font: 12px/20px 'Helvetica Neue', Arial, Helvetica, sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div class="map-overlay" id="controls">
+        <label for="level-select">Select Level:</label>
+        <select id="level-select"></select>
+
+        <label for="parent-filter-select" id="parent-filter-label">Filter by Parent:</label>
+        <select id="parent-filter-select"></select>
+
+        <label for="specific-unit-select" id="specific-unit-label">Specific Unit:</label>
+        <select id="specific-unit-select"></select>
+    </div>
+
+    <script>
+        // MapLibre GL JS configuration
+        const map = new maplibregl.Map({
+            container: 'map',
+            style: 'https://demotiles.maplibre.org/style.json', // Open-source style. You can use others or create your own.
+            center: [90.3563, 23.6850], // Longitude, Latitude for Bangladesh center
+            zoom: 7
+        });
+
+        // --- Configuration ---
+        const GEOJSON_BASE_PATH = './data/'; // Path to your GeoJSON files
+        const FILE_NAMES = {
+            '0': 'gadm41_BGD_0.geojson',
+            '1': 'gadm41_BGD_1.geojson',
+            '2': 'gadm41_BGD_2.geojson',
+            '3': 'gadm41_BGD_3.geojson',
+            '4': 'gadm41_BGD_4.geojson'
+        };
+        // Property keys in your GeoJSON 'properties' object for names
+        const PROPERTY_KEYS = {
+            '0': 'NAME_0',
+            '1': 'NAME_1',
+            '2': 'NAME_2',
+            '3': 'NAME_3',
+            '4': 'NAME_4'
+        };
+        // Base zoom level for each layer (optional, but can improve initial view)
+        const ZOOM_LEVELS = {
+            '0': 7,
+            '1': 7.5,
+            '2': 8,
+            '3': 9,
+            '4': 10
+        };
+
+        // --- Global Variables ---
+        let geojsonCache = {}; // Stores loaded GeoJSON data
+        let currentLevel = '0'; // Currently selected administrative level
+        let parentFilterValue = null; // Value for parent filter dropdown
+        let specificUnitValue = null; // Value for specific unit dropdown
+
+        // --- DOM Elements ---
+        const levelSelect = document.getElementById('level-select');
+        const parentFilterSelect = document.getElementById('parent-filter-select');
+        const specificUnitSelect = document.getElementById('specific-unit-select');
+        const parentFilterLabel = document.getElementById('parent-filter-label');
+        const specificUnitLabel = document.getElementById('specific-unit-label');
+
+        // --- Helper Function for Consistent Coloring ---
+        function stringToHslColor(str, s, l) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = str.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const h = hash % 360;
+            return `hsl(${h}, ${s}%, ${l}%)`;
+        }
+
+        // --- Data Loading ---
+        async function loadAllGeoJSON() {
+            const fetchPromises = Object.entries(FILE_NAMES).map(async ([level, fileName]) => {
+                const filePath = GEOJSON_BASE_PATH + fileName;
+                try {
+                    const response = await fetch(filePath);
+                    if (!response.ok) {
+                        throw new Error(`Failed to load ${fileName}: ${response.statusText}`);
+                    }
+                    geojsonCache[level] = await response.json();
+                    console.log(`Loaded ${fileName}`);
+                } catch (error) {
+                    console.error(`Error loading GeoJSON for level ${level}:`, error);
+                    geojsonCache[level] = null; // Mark as failed to load
+                }
+            });
+            await Promise.all(fetchPromises);
+            console.log('All GeoJSON files processed.');
+        }
+
+        // --- Map Layer Management ---
+        function addOrUpdateLayer(level, data) {
+            const layerIdFill = `level-${level}-fill`;
+            const layerIdBorder = `level-${level}-border`;
+            const propertyKey = PROPERTY_KEYS[level];
+
+            if (!map.getSource(layerIdFill)) { // If source doesn't exist, add it
+                map.addSource(layerIdFill, {
+                    'type': 'geojson',
+                    'data': {
+                        type: 'FeatureCollection',
+                        features: [] // Start with empty, will set data later
+                    }
+                });
+                map.addLayer({
+                    'id': layerIdFill,
+                    'type': 'fill',
+                    'source': layerIdFill,
+                    'paint': {
+                        'fill-color': ['get', 'fill-color'], // Use property for dynamic coloring
+                        'fill-opacity': ['case', ['boolean', ['feature-state', 'hover'], false], 0.9, 0.7] // Higher opacity on hover
+                    },
+                    'layout': {
+                        'visibility': 'none' // Initially hidden
+                    }
+                });
+                map.addLayer({
+                    'id': layerIdBorder,
+                    'type': 'line',
+                    'source': layerIdFill, // Use the same source
+                    'paint': {
+                        'line-color': 'black',
+                        'line-width': 1.5
+                    },
+                    'layout': {
+                        'visibility': 'none' // Initially hidden
+                    }
+                });
+
+                // Add hover and click effects for fill layer
+                let hoveredFeatureId = null;
+                map.on('mousemove', layerIdFill, (e) => {
+                    if (e.features.length > 0) {
+                        if (hoveredFeatureId !== null) {
+                            map.setFeatureState(
+                                { source: layerIdFill, id: hoveredFeatureId },
+                                { hover: false }
+                            );
+                        }
+                        hoveredFeatureId = e.features[0].id;
+                        map.setFeatureState(
+                            { source: layerIdFill, id: hoveredFeatureId },
+                            { hover: true }
+                        );
+                        // Change cursor
+                        map.getCanvas().style.cursor = 'pointer';
+                    }
+                });
+                map.on('mouseleave', layerIdFill, () => {
+                    if (hoveredFeatureId !== null) {
+                        map.setFeatureState(
+                            { source: layerIdFill, id: hoveredFeatureId },
+                            { hover: false }
+                        );
+                    }
+                    hoveredFeatureId = null;
+                    map.getCanvas().style.cursor = ''; // Reset cursor
+                });
+
+                map.on('click', layerIdFill, (e) => {
+                    const props = e.features[0].properties;
+                    let popupContent = `<strong>${PROPERTY_KEYS[level].replace('NAME_', 'Level ')}:</strong> ${props[PROPERTY_KEYS[level]]}<br>`;
+                    // Add all relevant properties to popup
+                    for (const key in props) {
+                        if (key.startsWith('NAME_') && props[key] !== null && props[key] !== undefined && props[key] !== '') {
+                            popupContent += `<strong>${key.replace('NAME_', 'Level ')}:</strong> ${props[key]}<br>`;
+                        }
+                    }
+
+                    new maplibregl.Popup()
+                        .setLngLat(e.lngLat)
+                        .setHTML(popupContent)
+                        .addTo(map);
+                });
+
+            }
+
+            // Prepare features for dynamic coloring (MapLibre's fill-color property)
+            const featuresWithColors = data.features.map(f => {
+                const featureName = f.properties[propertyKey];
+                return {
+                    ...f,
+                    properties: {
+                        ...f.properties,
+                        'fill-color': stringToHslColor(featureName, 70, 60), // Unique color for each unit
+                        'id': f.id // Ensure ID is present for feature states
+                    }
+                };
+            });
+
+            // Update source data
+            map.getSource(layerIdFill).setData({
+                type: 'FeatureCollection',
+                features: featuresWithColors
+            });
+        }
+
+        function updateMapLayersVisibility() {
+            // Hide all layers first
+            Object.keys(FILE_NAMES).forEach(level => {
+                const layerIdFill = `level-${level}-fill`;
+                const layerIdBorder = `level-${level}-border`;
+                if (map.getLayer(layerIdFill)) {
+                    map.setLayoutProperty(layerIdFill, 'visibility', 'none');
+                    map.setLayoutProperty(layerIdBorder, 'visibility', 'none');
+                }
+            });
+
+            // Show the selected level's layers
+            const selectedFillLayerId = `level-${currentLevel}-fill`;
+            const selectedBorderLayerId = `level-${currentLevel}-border`;
+            if (map.getLayer(selectedFillLayerId)) {
+                map.setLayoutProperty(selectedFillLayerId, 'visibility', 'visible');
+                map.setLayoutProperty(selectedBorderLayerId, 'visibility', 'visible');
+            }
+        }
+
+        function applyFilters() {
+            const propertyKey = PROPERTY_KEYS[currentLevel];
+            const layerId = `level-${currentLevel}-fill`;
+
+            let filter = ['all'];
+
+            // Apply parent filter
+            if (parentFilterValue !== null && currentLevel !== '0') {
+                const parentLevelKey = PROPERTY_KEYS[parseInt(currentLevel) - 1];
+                filter.push(['==', ['get', parentLevelKey], parentFilterValue]);
+            }
+
+            // Apply specific unit filter
+            if (specificUnitValue !== null && propertyKey) {
+                filter.push(['==', ['get', propertyKey], specificUnitValue]);
+            }
+
+            if (map.getLayer(layerId)) {
+                map.setFilter(layerId, filter);
+                map.setFilter(`level-${currentLevel}-border`, filter);
+
+                // Adjust map zoom and center for the current level
+                if (ZOOM_LEVELS[currentLevel]) {
+                    map.setZoom(ZOOM_LEVELS[currentLevel]);
+                    // You could also try to fit bounds of filtered features, but that's more complex
+                    // and might require turf.js if MapLibre doesn't have a direct method for features.
+                }
+            }
+        }
+
+        // --- Dropdown Population & Updates ---
+        function populateLevelDropdown() {
+            levelSelect.innerHTML = ''; // Clear existing options
+            Object.entries(FILE_NAMES).forEach(([level, fileName]) => {
+                if (geojsonCache[level]) { // Only add if data loaded successfully
+                    const option = document.createElement('option');
+                    option.value = level;
+                    option.textContent = `Level ${level} (${PROPERTY_KEYS[level].replace('NAME_', '')})`;
+                    levelSelect.appendChild(option);
+                }
+            });
+            levelSelect.value = currentLevel; // Set initial selection
+        }
+
+        function populateParentFilterDropdown() {
+            parentFilterSelect.innerHTML = '<option value="">No filter</option>';
+            parentFilterSelect.value = ''; // Reset selection
+
+            if (currentLevel === '0') {
+                parentFilterSelect.disabled = true;
+                parentFilterLabel.style.display = 'none';
+                return;
+            } else {
+                parentFilterSelect.disabled = false;
+                parentFilterLabel.style.display = 'block';
+            }
+
+            const parentLevel = String(parseInt(currentLevel) - 1);
+            const parentKey = PROPERTY_KEYS[parentLevel];
+            const parentData = geojsonCache[parentLevel];
+
+            if (parentData && parentKey) {
+                const uniqueParents = [...new Set(parentData.features.map(f => f.properties[parentKey]))].sort();
+                uniqueParents.forEach(name => {
+                    if (name) { // Avoid null/empty names
+                        const option = document.createElement('option');
+                        option.value = name;
+                        option.textContent = name;
+                        parentFilterSelect.appendChild(option);
+                    }
+                });
+                parentFilterLabel.textContent = `Filter by ${parentKey.replace('NAME_', 'Level ')}:`;
+            } else {
+                parentFilterSelect.disabled = true;
+                parentFilterLabel.style.display = 'none';
+            }
+            parentFilterSelect.value = parentFilterValue || '';
+        }
+
+        function populateSpecificUnitDropdown() {
+            specificUnitSelect.innerHTML = '<option value="">All</option>';
+            specificUnitSelect.value = ''; // Reset selection
+
+            const currentKey = PROPERTY_KEYS[currentLevel];
+            const currentData = geojsonCache[currentLevel];
+
+            if (currentData && currentKey) {
+                let units = currentData.features;
+
+                // Apply parent filter to units list if active
+                if (parentFilterValue !== null && currentLevel !== '0') {
+                    const parentKey = PROPERTY_KEYS[parseInt(currentLevel) - 1];
+                    units = units.filter(f => f.properties[parentKey] === parentFilterValue);
+                }
+
+                const uniqueUnits = [...new Set(units.map(f => f.properties[currentKey]))].sort();
+                uniqueUnits.forEach(name => {
+                    if (name) {
+                        const option = document.createElement('option');
+                        option.value = name;
+                        option.textContent = name;
+                        specificUnitSelect.appendChild(option);
+                    }
+                });
+                specificUnitLabel.textContent = `Select ${currentKey.replace('NAME_', 'Level ')}:`;
+            } else {
+                 specificUnitLabel.textContent = `Specific Unit:`;
+            }
+            specificUnitSelect.value = specificUnitValue || '';
+        }
+
+        // --- Event Handlers ---
+        levelSelect.addEventListener('change', (e) => {
+            currentLevel = e.target.value;
+            parentFilterValue = null; // Reset parent filter
+            specificUnitValue = null; // Reset specific unit filter
+            updateUIAndMap();
+        });
+
+        parentFilterSelect.addEventListener('change', (e) => {
+            parentFilterValue = e.target.value === "" ? null : e.target.value;
+            specificUnitValue = null; // Reset specific unit filter
+            updateUIAndMap();
+        });
+
+        specificUnitSelect.addEventListener('change', (e) => {
+            specificUnitValue = e.target.value === "" ? null : e.target.value;
+            updateUIAndMap();
+        });
+
+        function updateUIAndMap() {
+            populateParentFilterDropdown();
+            populateSpecificUnitDropdown();
+            updateMapLayersVisibility();
+            applyFilters();
+        }
+
+        // --- Initialization ---
+        map.on('load', async () => {
+            console.log('Map loaded.');
+            await loadAllGeoJSON();
+
+            // Add all layers to the map, but keep them hidden initially
+            Object.entries(geojsonCache).forEach(([level, data]) => {
+                if (data) {
+                    addOrUpdateLayer(level, data);
+                }
+            });
+
+            populateLevelDropdown(); // Populate dropdowns after data is loaded
+            updateUIAndMap(); // Initial display of map and controls
+        });
+    </script>
+</body>
+  </html>
+  
